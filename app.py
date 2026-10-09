@@ -1,10 +1,12 @@
-import streamlit as st
+
+import re
 import pandas as pd
 import plotly.express as px
+import streamlit as st
 
-# --------------------------------------------------
+# ==================================================
 # PAGE CONFIGURATION
-# --------------------------------------------------
+# ==================================================
 
 st.set_page_config(
     page_title="Student Performance Analyzer",
@@ -14,24 +16,51 @@ st.set_page_config(
 
 st.title("🎓 Student Performance Analyzer")
 st.write(
-    "Analyze student marks, attendance, and academic performance "
-    "using interactive charts and personalized recommendations."
+    "Analyze student results, compare subjects, and generate "
+    "individual reports with personalized recommendations."
 )
 
-# --------------------------------------------------
+# ==================================================
 # SIDEBAR
-# --------------------------------------------------
+# ==================================================
 
 with st.sidebar:
     st.title("🎓 Student Analytics")
     st.write("Upload, analyze, and explore student results.")
     st.divider()
     st.caption("Student Performance Analyzer")
-    st.caption("Version 1.0")
+    st.caption("Version 3.0")
 
-# --------------------------------------------------
+# ==================================================
+# EXAM SETTINGS
+# ==================================================
+
+st.divider()
+st.header("📝 Exam Settings")
+
+exam_type = st.radio(
+    "Select the exam type",
+    options=["60-Mark Exam", "20-Mark Exam"],
+    horizontal=True,
+    key="exam_type"
+)
+
+if exam_type == "60-Mark Exam":
+    MAX_MARKS = 60
+    PASS_MARKS = 24
+else:
+    MAX_MARKS = 20
+    PASS_MARKS = 8
+
+st.info(
+    f"Maximum marks per subject: {MAX_MARKS} | "
+    f"Passing marks: {PASS_MARKS} | "
+    f"Passing percentage: 40%"
+)
+
+# ==================================================
 # SAMPLE DATA
-# --------------------------------------------------
+# ==================================================
 
 sample_data = {
     "Student": [
@@ -44,16 +73,72 @@ sample_data = {
     "Attendance": [92, 65, 98, 75, 58, 85, 95, 55]
 }
 
-SUBJECTS = ["Math", "Science", "English"]
+# ==================================================
+# HELPER FUNCTIONS
+# ==================================================
 
-# --------------------------------------------------
-# DATA UPLOAD
-# --------------------------------------------------
+def normalize_name(name):
+    name = str(name).strip().lower()
+    name = re.sub(r"%", " percent ", name)
+    name = re.sub(r"[^a-z0-9]+", " ", name)
+    return " ".join(name.split())
 
+
+def detect_column(columns, aliases):
+    normalized = {
+        column: normalize_name(column)
+        for column in columns
+    }
+
+    # Exact matches first
+    for alias in aliases:
+        target = normalize_name(alias)
+        for column, name in normalized.items():
+            if name == target:
+                return column
+
+    # Then look for a complete alias phrase in the column name
+    for alias in aliases:
+        target = normalize_name(alias)
+        for column, name in normalized.items():
+            if target and target in name:
+                return column
+
+    return None
+
+
+STUDENT_ALIASES = [
+    "student", "student name", "name", "full name",
+    "learner", "learner name", "candidate name",
+    "pupil", "pupil name"
+]
+
+ATTENDANCE_ALIASES = [
+    "attendance", "attendance percent",
+    "attendance percentage", "attendance rate",
+    "present percent", "present percentage",
+    "presence rate"
+]
+
+NON_SUBJECT_ALIASES = [
+    "id", "student id", "roll number", "roll no",
+    "registration number", "serial number", "sr no",
+    "index number", "age", "class", "grade", "year",
+    "semester", "phone", "email", "attendance",
+    "attendance percent", "attendance percentage",
+    "attendance rate", "present percent",
+    "present percentage", "presence rate"
+]
+
+# ==================================================
+# UPLOAD DATA
+# ==================================================
+
+st.divider()
 st.header("📂 Upload Student Dataset")
 
 uploaded_file = st.file_uploader(
-    "Upload a CSV file containing student marks and attendance",
+    "Upload your CSV file",
     type=["csv"]
 )
 
@@ -61,106 +146,304 @@ if uploaded_file is not None:
     try:
         original_df = pd.read_csv(uploaded_file)
     except Exception as error:
-        st.error(f"Unable to read the uploaded file: {error}")
+        st.error(f"Could not read your CSV file: {error}")
         st.stop()
 else:
     original_df = pd.DataFrame(sample_data)
-    st.info("Showing sample student data. Upload your own CSV to analyze it.")
+    st.info(
+        "Showing sample data. Upload your own CSV to analyze it."
+    )
 
-# --------------------------------------------------
-# DATA VALIDATION AND PREPARATION
-# --------------------------------------------------
+if original_df.empty:
+    st.warning("Your CSV file is empty.")
+    st.stop()
 
-required_columns = ["Student", "Math", "Science", "English", "Attendance"]
-
-missing_columns = [
-    column for column in required_columns
-    if column not in original_df.columns
+original_df.columns = [
+    str(column).strip() for column in original_df.columns
 ]
 
-if missing_columns:
+if any(not column for column in original_df.columns):
+    st.error("Every CSV column must have a name.")
+    st.stop()
+
+if original_df.columns.duplicated().any():
     st.error(
-        "Your CSV is missing these required columns: "
-        + ", ".join(missing_columns)
-    )
-    st.info(
-        "Required columns: Student, Math, Science, English, Attendance"
+        "Duplicate column names were found. Rename them so each "
+        "column has a unique name."
     )
     st.stop()
 
-df = original_df.copy()
+columns = original_df.columns.tolist()
 
-df["Student"] = df["Student"].fillna("").astype(str).str.strip()
+# ==================================================
+# AUTOMATIC COLUMN DETECTION
+# ==================================================
 
-for column in SUBJECTS + ["Attendance"]:
-    df[column] = pd.to_numeric(df[column], errors="coerce")
+detected_student = detect_column(columns, STUDENT_ALIASES)
 
-df = df.dropna(
-    subset=["Student"] + SUBJECTS + ["Attendance"]
+if detected_student is None:
+    detected_student = columns[0]
+
+detected_attendance = detect_column(
+    columns, ATTENDANCE_ALIASES
 )
 
-df = df[df["Student"] != ""]
+detected_subjects = []
 
-if df.empty:
-    st.warning("No valid student records were found in the dataset.")
+for column in columns:
+    if column == detected_student or column == detected_attendance:
+        continue
+
+    normalized = normalize_name(column)
+
+    if any(
+        normalize_name(alias) == normalized
+        for alias in NON_SUBJECT_ALIASES
+    ):
+        continue
+
+    numeric_values = pd.to_numeric(
+        original_df[column], errors="coerce"
+    )
+
+    if numeric_values.notna().any():
+        detected_subjects.append(column)
+
+# ==================================================
+# MANUAL COLUMN MAPPING
+# ==================================================
+
+st.divider()
+st.header("🧩 Configure Your Columns")
+
+st.write(
+    "Check the automatically detected columns below. You can "
+    "change them to match your own CSV."
+)
+
+with st.container(border=True):
+    student_column = st.selectbox(
+        "Student name column",
+        options=columns,
+        index=columns.index(detected_student),
+        key="student_column"
+    )
+
+    attendance_options = ["— No attendance column —"] + columns
+
+    attendance_default = (
+        detected_attendance
+        if detected_attendance in columns
+        else "— No attendance column —"
+    )
+
+    attendance_column = st.selectbox(
+        "Attendance column (optional)",
+        options=attendance_options,
+        index=attendance_options.index(attendance_default),
+        key="attendance_column"
+    )
+
+    subject_candidates = [
+        column for column in columns
+        if column != student_column
+        and column != attendance_column
+        and column != "— No attendance column —"
+    ]
+
+    valid_detected_subjects = [
+        subject for subject in detected_subjects
+        if subject in subject_candidates
+    ]
+
+    selected_subjects = st.multiselect(
+        "Subject marks columns",
+        options=subject_candidates,
+        default=valid_detected_subjects,
+        help="Select every column containing subject marks.",
+        key="subject_columns"
+    )
+
+if not selected_subjects:
+    st.warning("Select at least one subject marks column.")
     st.stop()
 
-# Validate the expected score ranges
-invalid_scores = (
-    (df[SUBJECTS] < 0).any(axis=1)
-    | (df[SUBJECTS] > 100).any(axis=1)
-    | (df["Attendance"] < 0)
-    | (df["Attendance"] > 100)
+if len(selected_subjects) != len(set(selected_subjects)):
+    st.error("A subject column cannot be selected more than once.")
+    st.stop()
+
+if student_column in selected_subjects:
+    st.error("The student name column cannot be a subject.")
+    st.stop()
+
+if attendance_column in selected_subjects:
+    st.error("The attendance column cannot be a subject.")
+    st.stop()
+
+has_attendance = (
+    attendance_column != "— No attendance column —"
 )
 
-if invalid_scores.any():
+subjects = selected_subjects
+
+# ==================================================
+# PREPARE DATA
+# ==================================================
+
+df = pd.DataFrame()
+
+df["Student"] = (
+    original_df[student_column]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+for subject in subjects:
+    df[subject] = pd.to_numeric(
+        original_df[subject], errors="coerce"
+    )
+
+if has_attendance:
+    df["Attendance"] = pd.to_numeric(
+        original_df[attendance_column], errors="coerce"
+    )
+
+# Scale the built-in demonstration data to the selected exam.
+# Uploaded CSV marks must already use the selected exam's scale.
+if uploaded_file is None:
+    for subject in subjects:
+        df[subject] = (
+            df[subject] * MAX_MARKS / 100
+        ).round(1)
+
+required_columns = ["Student"] + subjects
+
+if has_attendance:
+    required_columns.append("Attendance")
+
+valid_rows = df[required_columns].notna().all(axis=1)
+valid_rows &= df["Student"].ne("")
+
+invalid_count = int((~valid_rows).sum())
+
+if invalid_count:
     st.warning(
-        "Rows containing marks or attendance outside the 0–100 range "
-        "have been excluded."
+        f"{invalid_count} row(s) were excluded because a name or "
+        "required numeric value was missing or invalid."
     )
-    df = df.loc[~invalid_scores].copy()
+
+df = df.loc[valid_rows].copy()
 
 if df.empty:
-    st.warning("No valid records remain after checking score ranges.")
+    st.error(
+        "No valid records remain. Check your column mapping and "
+        "ensure your marks contain numeric values."
+    )
     st.stop()
 
-# Calculate student averages and results
-df["Average"] = df[SUBJECTS].mean(axis=1)
+# ==================================================
+# VALIDATE MARKS AND ATTENDANCE
+# ==================================================
 
-df["Result"] = df[SUBJECTS].apply(
-    lambda row: "Pass" if (row >= 35).all() else "Needs Improvement",
-    axis=1
+out_of_range = (
+    (df[subjects] < 0).any(axis=1)
+    | (df[subjects] > MAX_MARKS).any(axis=1)
+)
+
+if has_attendance:
+    out_of_range |= (
+        (df["Attendance"] < 0)
+        | (df["Attendance"] > 100)
+    )
+
+range_error_count = int(out_of_range.sum())
+
+if range_error_count:
+    st.warning(
+        f"{range_error_count} row(s) were excluded because marks "
+        f"must be between 0 and {MAX_MARKS}"
+        + (
+            " and attendance must be between 0 and 100."
+            if has_attendance else "."
+        )
+    )
+    df = df.loc[~out_of_range].copy()
+
+if df.empty:
+    st.error(
+        "No valid records remain. Check the selected exam type "
+        "and the maximum marks in your CSV."
+    )
+    st.stop()
+
+# ==================================================
+# CALCULATE RESULTS
+# ==================================================
+
+# Normalize the average to a percentage so categories are comparable
+# across 20-mark and 60-mark exams.
+df["Average"] = (
+    df[subjects].mean(axis=1) / MAX_MARKS * 100
+)
+
+# Passing requires the student to reach the passing mark
+# in every selected subject.
+df["Result"] = df[subjects].ge(PASS_MARKS).all(axis=1).map(
+    {True: "Pass", False: "Needs Improvement"}
 )
 
 df["Category"] = df["Average"].apply(
-    lambda average: (
-        "Excellent" if average >= 85
-        else "Good" if average >= 70
-        else "Average" if average >= 50
+    lambda value: (
+        "Excellent" if value >= 85
+        else "Good" if value >= 70
+        else "Average" if value >= 50
         else "Needs Improvement"
     )
 )
 
-# --------------------------------------------------
-# KEY PERFORMANCE METRICS
-# --------------------------------------------------
+# Subject averages are also percentages
+subject_averages = pd.DataFrame({
+    "Subject": subjects,
+    "Average Percentage": [
+        df[subject].mean() / MAX_MARKS * 100
+        for subject in subjects
+    ]
+})
+
+# ==================================================
+# OVERALL DASHBOARD
+# ==================================================
 
 st.divider()
 st.header("📊 Overall Performance")
 
-col1, col2, col3, col4 = st.columns(4)
+if has_attendance:
+    c1, c2, c3, c4 = st.columns(4)
 
-col1.metric("Total Students", len(df))
-col2.metric("Class Average", f"{df['Average'].mean():.1f}%")
-col3.metric("Average Attendance", f"{df['Attendance'].mean():.1f}%")
-col4.metric(
-    "Students Passing",
-    f"{(df['Result'] == 'Pass').sum()} / {len(df)}"
-)
+    c1.metric("Total Students", len(df))
+    c2.metric("Class Average", f"{df['Average'].mean():.1f}%")
+    c3.metric(
+        "Average Attendance",
+        f"{df['Attendance'].mean():.1f}%"
+    )
+    c4.metric(
+        "Students Passing",
+        f"{(df['Result'] == 'Pass').sum()} / {len(df)}"
+    )
+else:
+    c1, c2, c3 = st.columns(3)
 
-# --------------------------------------------------
-# PERFORMANCE CHARTS
-# --------------------------------------------------
+    c1.metric("Total Students", len(df))
+    c2.metric("Class Average", f"{df['Average'].mean():.1f}%")
+    c3.metric(
+        "Students Passing",
+        f"{(df['Result'] == 'Pass').sum()} / {len(df)}"
+    )
+
+# ==================================================
+# CHARTS
+# ==================================================
 
 st.divider()
 st.header("📈 Performance Dashboard")
@@ -168,18 +451,13 @@ st.header("📈 Performance Dashboard")
 chart1, chart2 = st.columns(2)
 
 with chart1:
-    subject_averages = pd.DataFrame({
-        "Subject": SUBJECTS,
-        "Average Marks": [df[subject].mean() for subject in SUBJECTS]
-    })
-
     fig_subjects = px.bar(
         subject_averages,
         x="Subject",
-        y="Average Marks",
+        y="Average Percentage",
         color="Subject",
         range_y=[0, 100],
-        title="Average Marks by Subject",
+        title="Average Percentage by Subject",
         text_auto=".1f"
     )
 
@@ -203,35 +481,41 @@ with chart2:
 
     st.plotly_chart(fig_categories, use_container_width=True)
 
-# --------------------------------------------------
+# ==================================================
 # STUDENT COMPARISON
-# --------------------------------------------------
+# ==================================================
 
 st.subheader("📚 Compare Student Performance")
 
-comparison_chart = px.bar(
+fig_comparison = px.bar(
     df,
     x="Student",
     y="Average",
     color="Category",
     range_y=[0, 100],
-    title="Average Marks by Student",
-    labels={"Average": "Average Marks"}
+    title="Average Percentage by Student",
+    labels={"Average": "Average Percentage"}
 )
 
-st.plotly_chart(comparison_chart, use_container_width=True)
+st.plotly_chart(fig_comparison, use_container_width=True)
 
-# --------------------------------------------------
+# ==================================================
 # KEY INSIGHTS
-# --------------------------------------------------
+# ==================================================
 
 st.divider()
 st.header("🔍 Key Insights")
 
 best_student = df.loc[df["Average"].idxmax()]
 lowest_student = df.loc[df["Average"].idxmin()]
-best_subject = df[SUBJECTS].mean().idxmax()
-weakest_subject = df[SUBJECTS].mean().idxmin()
+
+best_subject = subject_averages.loc[
+    subject_averages["Average Percentage"].idxmax()
+]
+
+weakest_subject = subject_averages.loc[
+    subject_averages["Average Percentage"].idxmin()
+]
 
 insight1, insight2 = st.columns(2)
 
@@ -242,8 +526,8 @@ with insight1:
     )
 
     st.info(
-        f"📘 **Strongest Subject:** {best_subject}, "
-        f"with an average of {df[best_subject].mean():.1f}%."
+        f"📘 **Strongest Subject:** {best_subject['Subject']} "
+        f"with {best_subject['Average Percentage']:.1f}% average."
     )
 
 with insight2:
@@ -253,132 +537,114 @@ with insight2:
     )
 
     st.info(
-        f"📖 **Subject to Focus On:** {weakest_subject}, "
-        f"with an average of {df[weakest_subject].mean():.1f}%."
+        f"📖 **Subject to Focus On:** {weakest_subject['Subject']} "
+        f"with {weakest_subject['Average Percentage']:.1f}% average."
     )
 
 # ==================================================
-# NEW FEATURE 1: INDIVIDUAL STUDENT REPORT
+# INDIVIDUAL STUDENT REPORT
 # ==================================================
 
 st.divider()
 st.header("👤 Individual Student Report")
 
-student_names = df["Student"].tolist()
+student_names = df["Student"].drop_duplicates().tolist()
 
 selected_student = st.selectbox(
-    "Select a student to view their report",
+    "Select a student",
     options=student_names,
     key="individual_student"
 )
 
-student = df[
-    df["Student"] == selected_student
-].iloc[0]
+student = df[df["Student"] == selected_student].iloc[0]
 
 st.subheader(f"Report for {selected_student}")
 
-report_col1, report_col2, report_col3 = st.columns(3)
+if has_attendance:
+    r1, r2, r3 = st.columns(3)
 
-report_col1.metric(
-    "Average Marks",
-    f"{student['Average']:.1f}%"
+    r1.metric("Average Percentage", f"{student['Average']:.1f}%")
+    r2.metric("Attendance", f"{student['Attendance']:.1f}%")
+    r3.metric("Result", student["Result"])
+else:
+    r1, r2 = st.columns(2)
+
+    r1.metric("Average Percentage", f"{student['Average']:.1f}%")
+    r2.metric("Result", student["Result"])
+
+st.caption(
+    f"Performance Category: {student['Category']} | "
+    f"Exam: {MAX_MARKS} marks | Passing mark: {PASS_MARKS}"
 )
-
-report_col2.metric(
-    "Attendance",
-    f"{student['Attendance']:.1f}%"
-)
-
-report_col3.metric(
-    "Result",
-    student["Result"]
-)
-
-st.caption(f"Performance Category: {student['Category']}")
 
 student_marks = pd.DataFrame({
-    "Subject": SUBJECTS,
-    "Marks": [student[subject] for subject in SUBJECTS]
+    "Subject": subjects,
+    "Marks": [student[subject] for subject in subjects]
 })
 
-report_chart = px.bar(
+fig_student = px.bar(
     student_marks,
     x="Subject",
     y="Marks",
     color="Subject",
-    range_y=[0, 100],
+    range_y=[0, MAX_MARKS],
     title=f"{selected_student}'s Subject-wise Marks",
     text_auto=".1f"
 )
 
-st.plotly_chart(
-    report_chart,
-    use_container_width=True
-)
-
-# Download an individual student's report
-report_csv = pd.DataFrame([student]).to_csv(index=False)
+st.plotly_chart(fig_student, use_container_width=True)
 
 st.download_button(
-    label="📥 Download Individual Student Report",
-    data=report_csv,
-    file_name=f"{selected_student}_report.csv",
+    "📥 Download Individual Student Report",
+    data=pd.DataFrame([student]).to_csv(index=False),
+    file_name="student_report.csv",
     mime="text/csv"
 )
 
 # ==================================================
-# NEW FEATURE 2: PERSONALIZED RECOMMENDATIONS
+# PERSONALIZED RECOMMENDATIONS
 # ==================================================
 
 st.divider()
 st.header("💡 Personalized Recommendations")
 
-st.write(
-    f"Suggestions based on the current marks and attendance "
-    f"record for **{selected_student}**:"
-)
+st.write(f"Suggestions for **{selected_student}**:")
 
 recommendations = []
 
-for subject in SUBJECTS:
+for subject in subjects:
     marks = student[subject]
 
-    if marks < 35:
+    if marks < PASS_MARKS:
         recommendations.append(
-            f"⚠️ **{subject}:** Marks are below 35. "
-            "Prioritize revision and seek additional academic support."
+            f"⚠️ **{subject}:** Below the passing mark of "
+            f"{PASS_MARKS}/{MAX_MARKS}. Revise difficult topics "
+            "and seek additional academic support."
         )
-    elif marks < 60:
+    elif marks < MAX_MARKS * 0.60:
         recommendations.append(
-            f"📚 **{subject}:** Practice more questions and revise "
-            "the topics you find difficult."
+            f"📚 **{subject}:** You passed, but consider practising "
+            "more questions to strengthen your understanding."
         )
 
-if student["Attendance"] < 75:
+if has_attendance and student["Attendance"] < 75:
     recommendations.append(
         "📅 **Attendance:** Attendance is below 75%. "
         "Improve class attendance where possible."
     )
 
-if student["Average"] >= 85 and student["Attendance"] >= 90:
-    recommendations.append(
-        "🌟 **Excellent progress:** Maintain your study routine "
-        "and challenge yourself with more advanced topics."
-    )
-
 if not recommendations:
     recommendations.append(
-        "✅ **Keep it up!** Continue your current study routine "
-        "and review your subjects regularly."
+        "🌟 Good progress! Maintain your study routine and continue "
+        "reviewing your subjects regularly."
     )
 
 for recommendation in recommendations:
     st.markdown(f"- {recommendation}")
 
-# --------------------------------------------------
-# STUDENT RECORDS: SEARCH AND FILTER
-# --------------------------------------------------
+# ==================================================
+# SEARCH, FILTERS, AND RECORDS
+# ==================================================
 
 st.divider()
 st.header("📋 Student Records")
@@ -414,39 +680,32 @@ filtered = filtered[
 
 st.write(f"Showing **{len(filtered)}** student record(s).")
 
+display_columns = ["Student"] + subjects + ["Average"]
+
+if has_attendance:
+    display_columns.append("Attendance")
+
+display_columns += ["Result", "Category"]
+
 st.dataframe(
-    filtered[
-        [
-            "Student",
-            "Math",
-            "Science",
-            "English",
-            "Average",
-            "Attendance",
-            "Result",
-            "Category"
-        ]
-    ].round(1),
+    filtered[display_columns].round(1),
     use_container_width=True,
     hide_index=True
 )
 
-# Download filtered records
-filtered_csv = filtered.to_csv(index=False)
-
 st.download_button(
-    label="📥 Download Filtered Student Records",
-    data=filtered_csv,
+    "📥 Download Filtered Student Records",
+    data=filtered.to_csv(index=False),
     file_name="filtered_student_records.csv",
     mime="text/csv"
 )
 
-# --------------------------------------------------
+# ==================================================
 # FOOTER
-# --------------------------------------------------
+# ==================================================
 
 st.divider()
 st.caption(
-    "Student Performance Analyzer | Built with Python, "
-    "Streamlit, Pandas, and Plotly"
+    "Student Performance Analyzer | Python • Streamlit • "
+    "Pandas • Plotly"
 )
